@@ -1,0 +1,57 @@
+#!/usr/bin/python3
+
+
+import os
+import sys
+import socket
+import threading
+import queue
+
+broker_queue = queue.Queue()
+
+    
+def tcp_listen_worker():
+    serversocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    serversocket.bind(('', 12345))
+    serversocket.listen(1)
+    
+    while True:
+        (clientsocket, address) = serversocket.accept()
+        
+        
+def tcp_read_worker():
+    pass
+
+def tcp_write_worker():
+    pass
+
+def uds_read_worker():
+    pass
+
+def uds_write_worker():
+    pass
+    
+def uds_listen_worker():
+    pass
+
+def broker_worker():
+    print("broker worker")
+    
+    while True:
+        msg = broker_queue.get()
+        
+        if (msg["method"]=="create_master"):
+            print("configured as master")
+        if (msg["method"]=="create_client"):
+            print("connecting to {0}".format(msg["master"]))
+            
+if len(sys.argv)>1:
+    if sys.argv[1]=="master":
+        broker_queue.put({"method":"create_master"})
+    
+    if len(sys.argv)>2:
+        if sys.argv[1]=="client":
+            broker_queue.put({"method":"create_client",
+            "master":sys.argv[2]})
+        
+broker_worker()
