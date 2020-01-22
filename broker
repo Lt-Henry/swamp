@@ -6,8 +6,16 @@ import sys
 import socket
 import threading
 import queue
+import time
+
+class TCPConnection:
+    def __init__(self,sfd,address):
+        self.out=queue.Queue()
+        
+        
 
 broker_queue = queue.Queue()
+tcp_connections=[]
 
     
 def tcp_listen_worker():
@@ -17,8 +25,26 @@ def tcp_listen_worker():
     
     while True:
         (clientsocket, address) = serversocket.accept()
-        
-        
+        msg={}
+        msg["method"]="tcp_accept"
+        msg["socket"]=clientsocket
+        msg["address"]=address
+        broker_queue.put(msg)
+
+def tcp_connect_worker(master_address):
+    try:
+        clientsocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        clientsocket.connect((master_address,12345))
+        msg={}
+        msg["method"]="tcp_connect"
+        msg["master"]=master_address
+        broker_queue.put(msg)
+    except:
+        msg={}
+        msg["method"]="tcp_connect_error"
+        msg["master"]=master_address
+        broker_queue.put(msg)
+
 def tcp_read_worker():
     pass
 
@@ -40,11 +66,31 @@ def broker_worker():
     while True:
         msg = broker_queue.get()
         
-        if (msg["method"]=="create_master"):
+        method=msg.get("method")
+        
+        if (method==None):
+            print("Unknown msg")
+            continue
+        
+        if (method=="create_master"):
             print("configured as master")
-        if (msg["method"]=="create_client"):
-            print("connecting to {0}".format(msg["master"]))
+            t=threading.Thread(target=tcp_listen_worker)
+            t.start()
             
+        if (method=="create_client"):
+            print("connecting to {0}".format(msg["master"]))
+            t=threading.Thread(target=tcp_connect_worker,args=(msg["master"],))
+            t.start()
+            
+        if (method=="tcp_accept"):
+            print("incoming TCP connection")
+        
+        if (method=="tcp_connect"):
+            print("broker connected to {0}".format(msg["master"]))
+        
+        if (method=="tcp_connect_error"):
+            print("broker failed to connected to {0}".format(msg["master"]))
+        
 if len(sys.argv)>1:
     if sys.argv[1]=="master":
         broker_queue.put({"method":"create_master"})
