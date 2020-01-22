@@ -11,8 +11,10 @@ import time
 class TCPConnection:
     def __init__(self,sfd,address):
         self.out=queue.Queue()
-        
-        
+        self.sfd=sfd
+        self.address=address
+        self.r_worker=threading.Thread(target=tcp_read_worker,args=(self,))
+        self.w_worker=threading.Thread(target=tcp_write_worker,args=(self,))
 
 broker_queue = queue.Queue()
 tcp_connections=[]
@@ -37,19 +39,28 @@ def tcp_connect_worker(master_address):
         clientsocket.connect((master_address,12345))
         msg={}
         msg["method"]="tcp_connect"
-        msg["master"]=master_address
+        msg["socket"]=clientsocket
+        msg["address"]=master_address
         broker_queue.put(msg)
     except:
         msg={}
         msg["method"]="tcp_connect_error"
-        msg["master"]=master_address
+        msg["address"]=master_address
         broker_queue.put(msg)
 
-def tcp_read_worker():
-    pass
+def tcp_read_worker(connection):
+    
+    chunk=[]
+    while True:
+        buffer=connection.sfd.recv(4096)
+        
 
-def tcp_write_worker():
-    pass
+def tcp_write_worker(connection):
+    while True:
+        msg=connection.out.get()
+        #convert to bson
+        chunk=[]
+        
 
 def uds_read_worker():
     pass
@@ -84,12 +95,16 @@ def broker_worker():
             
         if (method=="tcp_accept"):
             print("incoming TCP connection")
+            connection=TCPConnection(msg["socket"],msg["address"])
+            tcp_connections.append(connection)
         
         if (method=="tcp_connect"):
-            print("broker connected to {0}".format(msg["master"]))
+            print("broker connected to {0}".format(msg["address"]))
+            connection=TCPConnection(msg["socket"],msg["address"])
+            tcp_connections.append(connection)
         
         if (method=="tcp_connect_error"):
-            print("broker failed to connected to {0}".format(msg["master"]))
+            print("broker failed to connected to {0}".format(msg["address"]))
         
 if len(sys.argv)>1:
     if sys.argv[1]=="master":
