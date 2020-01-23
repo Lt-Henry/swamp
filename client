@@ -12,6 +12,7 @@ import bson
 def send_message(sfd,msg):
     chunk=bson.BSON.encode(msg)
     sfd.send(chunk)
+    
 
 def receive_message(sfd):
     header=True
@@ -45,6 +46,10 @@ role=sys.argv[1]
 broker = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 broker.connect("/tmp/swamp-slave")
 
+
+t0=0
+t1=0
+
 if role=="sender":
     msg={}
     msg["method"]="helo"
@@ -53,15 +58,30 @@ if role=="sender":
     
     send_message(broker,msg)
 
+    t0=time.time()
     msg={}
-    msg["method"]="cp"
+    msg["method"]="open_file"
     msg["target"]="beta"
     msg["name"]=sys.argv[2]
-    
-    f=open(sys.argv[2],"rb")
-    msg["data"]=f.read()
     send_message(broker,msg)
+    
+    msg["method"]="write_file"
+    f=open(sys.argv[2],"rb")
+    while True:
+        chunk=f.read(32767)
+        if len(chunk)==0:
+            break
+        
+        msg["data"]=chunk
+        send_message(broker,msg)
     f.close()
+    
+    msg["method"]="close_file"
+    msg["data"]=None
+    send_message(broker,msg)
+    t1=time.time()
+    print("Sent in {0} seconds".format(t1-t0))
+    
     
 if role=="receiver":
     msg={}
@@ -70,12 +90,23 @@ if role=="receiver":
     msg["id"]="beta"
     
     send_message(broker,msg)
-    print("waiting for file...")
-    msg=receive_message(broker)
     
-    f=open("in-"+msg["name"],"wb")
-    f.write(msg["data"])
-    f.close()
+    f=None
+    while True:
+    
+        msg=receive_message(broker)
+        
+        if msg["method"]=="open_file":
+            t0=time.time()
+            print("Receiving file...")
+            f=open("in-"+msg["name"],"wb")
+        if msg["method"]=="close_file":
+            t1=time.time()
+            print("done")
+            f.close()
+            print("Received in {0} seconds".format(t1-t0))
+        if msg["method"]=="write_file":
+            f.write(msg["data"])
 
     
 broker.close()
