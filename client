@@ -1,0 +1,81 @@
+#!/usr/bin/python3
+
+import os
+import sys
+import socket
+import threading
+import queue
+import time
+import bson
+
+
+def send_message(sfd,msg):
+    chunk=bson.BSON.encode(msg)
+    sfd.send(chunk)
+
+def receive_message(sfd):
+    header=True
+    chunk=b''
+    size=0
+    remain=0
+    while True:
+        
+        if header:
+            hdr=sfd.recv(4)
+            size=(hdr[3]<<24) + (hdr[2]<<16) + (hdr[1]<<8) + hdr[0]
+            print("incoming packet of {0} bytes".format(size))
+            header=False
+            chunk=hdr
+            remain=size-4
+        else:
+            
+            request=min(remain,4096)
+            tmp=sfd.recv(request)
+            chunk=chunk+tmp
+            remain=remain-request
+            
+            if remain==0:
+                print("package complete")
+                header=True
+                msg=bson.BSON.decode(chunk)
+                return msg
+
+role=sys.argv[1]
+
+broker = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+broker.connect("/tmp/swamp-slave")
+
+if role=="sender":
+    msg={}
+    msg["method"]="helo"
+    msg["target"]="broker"
+    msg["id"]="alfa"
+    
+    send_message(broker,msg)
+
+    msg={}
+    msg["method"]="cp"
+    msg["target"]="beta"
+    msg["name"]=sys.argv[2]
+    
+    f=open(sys.argv[2],"rb")
+    msg["data"]=f.read()
+    send_message(broker,msg)
+    f.close()
+    
+if role=="receiver":
+    msg={}
+    msg["method"]="helo"
+    msg["target"]="broker"
+    msg["id"]="beta"
+    
+    send_message(broker,msg)
+    print("waiting for file...")
+    msg=receive_message(broker)
+    
+    f=open("in-"+msg["name"],"wb")
+    f.write(msg["data"])
+    f.close()
+
+    
+broker.close()

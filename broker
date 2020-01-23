@@ -1,27 +1,47 @@
 #!/usr/bin/python3
 
-
 import os
 import sys
 import socket
 import threading
 import queue
 import time
+import bson
 
+class UDSConnection:
+    def __init__(self,sfd,address):
+        self.out=queue.Queue()
+        self.sfd=sfd
+        self.address=address
+        self.id="udsconn"
+        self.r_worker=threading.Thread(target=uds_read_worker,args=(self,))
+        self.w_worker=threading.Thread(target=uds_write_worker,args=(self,))
+        self.r_worker.start()
+        self.w_worker.start()
+        
 class TCPConnection:
     def __init__(self,sfd,address):
         self.out=queue.Queue()
         self.sfd=sfd
         self.address=address
+        self.id="tcpconn"
         self.r_worker=threading.Thread(target=tcp_read_worker,args=(self,))
         self.w_worker=threading.Thread(target=tcp_write_worker,args=(self,))
+        self.r_worker.start()
+        self.w_worker.start()
 
 broker_queue = queue.Queue()
 tcp_connections=[]
+uds_connections=[]
 
+def timer_cb():
+    msg={}
+    msg["method"]="timer"
+    broker_queue.put(msg)
     
 def tcp_listen_worker():
     serversocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    serversocket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     serversocket.bind(('', 12345))
     serversocket.listen(1)
     
@@ -50,26 +70,103 @@ def tcp_connect_worker(master_address):
 
 def tcp_read_worker(connection):
     
-    chunk=[]
+    header=True
+    chunk=b''
+    size=0
+    remain=0
     while True:
-        buffer=connection.sfd.recv(4096)
+        
+        if header:
+            hdr=connection.sfd.recv(4)
+            if (len(hdr)==0):
+                break
+            size=(hdr[3]<<24) + (hdr[2]<<16) + (hdr[1]<<8) + hdr[0]
+            print("incoming packet of {0} bytes".format(size))
+            header=False
+            chunk=hdr
+            remain=size-4
+        else:
+            
+            request=min(remain,4096)
+            tmp=connection.sfd.recv(request)
+            chunk=chunk+tmp
+            remain=remain-request
+            
+            if remain==0:
+                print("package complete")
+                header=True
+                msg=bson.BSON.decode(chunk)
+                broker_queue.put(msg)
+            
         
 
 def tcp_write_worker(connection):
     while True:
         msg=connection.out.get()
-        #convert to bson
-        chunk=[]
+        
+        chunk=bson.BSON.encode(msg)
+        connection.sfd.send(chunk)
         
 
-def uds_read_worker():
-    pass
+def uds_read_worker(connection):
+    header=True
+    chunk=b''
+    size=0
+    remain=0
+    while True:
+        
+        if header:
+            hdr=connection.sfd.recv(4)
+            if (len(hdr)==0):
+                break
+            
+            size=(hdr[3]<<24) + (hdr[2]<<16) + (hdr[1]<<8) + hdr[0]
+            print("incoming UDS packet of {0} bytes".format(size))
+            header=False
+            chunk=hdr
+            remain=size-4
+        else:
+            
+            request=min(remain,8132)
+            tmp=connection.sfd.recv(request)
+            chunk=chunk+tmp
+            remain=remain-request
+            
+            if remain==0:
+                print("UDS package complete")
+                header=True
+                msg={}
+                msg["method"]="incoming_uds"
+                msg["connection"]=connection
+                msg["data"]=bson.BSON.decode(chunk)
+                broker_queue.put(msg)
 
-def uds_write_worker():
-    pass
+def uds_write_worker(connection):
+    while True:
+        msg=connection.out.get()
+        
+        chunk=bson.BSON.encode(msg)
+        connection.sfd.send(chunk)
     
-def uds_listen_worker():
-    pass
+def uds_listen_worker(bind_path):
+    
+    if os.path.exists(bind_path):
+        os.remove(bind_path)
+        
+    serversocket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    serversocket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    serversocket.bind(bind_path)
+    
+    serversocket.listen(1)
+    
+    while True:
+        (clientsocket, address) = serversocket.accept()
+        print(address)
+        msg={}
+        msg["method"]="uds_accept"
+        msg["socket"]=clientsocket
+        msg["address"]=address
+        broker_queue.put(msg)
 
 def broker_worker():
     print("broker worker")
@@ -87,16 +184,27 @@ def broker_worker():
             print("configured as master")
             t=threading.Thread(target=tcp_listen_worker)
             t.start()
+            threading.Timer(60, timer_cb).start()
+            
+            t=threading.Thread(target=uds_listen_worker,args=(msg["bind"],))
+            t.start()
             
         if (method=="create_client"):
             print("connecting to {0}".format(msg["master"]))
             t=threading.Thread(target=tcp_connect_worker,args=(msg["master"],))
             t.start()
             
+            t=threading.Thread(target=uds_listen_worker,args=(msg["bind"],))
+            t.start()
+            
         if (method=="tcp_accept"):
             print("incoming TCP connection")
             connection=TCPConnection(msg["socket"],msg["address"])
             tcp_connections.append(connection)
+            tmp = {}
+            tmp["method"]="welcome"
+            tmp["message"]="Welcome to master swamp broker"
+            connection.out.put(tmp)
         
         if (method=="tcp_connect"):
             print("broker connected to {0}".format(msg["address"]))
@@ -106,13 +214,60 @@ def broker_worker():
         if (method=="tcp_connect_error"):
             print("broker failed to connected to {0}".format(msg["address"]))
         
+        if (method=="uds_accept"):
+            print("new local client: {0}".format(msg["address"]))
+            connection=UDSConnection(msg["socket"],msg["address"])
+            uds_connections.append(connection)
+        
+        if (method=="welcome"):
+            print("Welcome received!")
+            print(msg["message"])
+        
+        if (method=="ping"):
+            print("ping received")
+            for c in tcp_connections:
+                tmp = {}
+                tmp["method"]="pong"
+                c.out.put(tmp)
+            
+        if (method=="pong"):
+            print("pong received")
+            threading.Timer(60, timer_cb).start()
+            
+        if (method=="timer"):
+            for c in tcp_connections:
+                tmp = {}
+                tmp["method"]="ping"
+                c.out.put(tmp)
+        
+        if (method=="incoming_uds"):
+            print("incoming uds message")
+            target=msg["data"]["target"]
+            
+            if (target=="broker"):
+                client_method=msg["data"]["method"]
+                
+                if (client_method=="helo"):
+                    id=msg["data"]["id"]
+                    
+                    msg["connection"].id=msg["data"]["id"]
+                    print("client identified as {0}".format(msg["data"]["id"]))
+                
+            else:
+                print("delivery to: {0}".format(target))
+                
+                for c in uds_connections:
+                    if c.id==target:
+                        c.out.put(msg["data"])
+        
 if len(sys.argv)>1:
     if sys.argv[1]=="master":
-        broker_queue.put({"method":"create_master"})
+        broker_queue.put({"method":"create_master","bind":"/tmp/swamp-master"})
     
     if len(sys.argv)>2:
         if sys.argv[1]=="client":
             broker_queue.put({"method":"create_client",
-            "master":sys.argv[2]})
+            "master":sys.argv[2],
+            "bind":"/tmp/swamp-slave"})
         
 broker_worker()
